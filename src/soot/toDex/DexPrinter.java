@@ -59,15 +59,10 @@ import org.jf.dexlib2.immutable.value.ImmutableNullEncodedValue;
 import org.jf.dexlib2.immutable.value.ImmutableShortEncodedValue;
 import org.jf.dexlib2.immutable.value.ImmutableStringEncodedValue;
 import org.jf.dexlib2.immutable.value.ImmutableTypeEncodedValue;
-import org.jf.dexlib2.writer.builder.BuilderEncodedValues;
-import org.jf.dexlib2.writer.builder.BuilderField;
-import org.jf.dexlib2.writer.builder.BuilderFieldReference;
-import org.jf.dexlib2.writer.builder.BuilderMethod;
-import org.jf.dexlib2.writer.builder.BuilderMethodReference;
-import org.jf.dexlib2.writer.builder.BuilderTypeReference;
-import org.jf.dexlib2.writer.builder.DexBuilder;
+import org.jf.dexlib2.writer.builder.*;
 import org.jf.dexlib2.writer.io.FileDataStore;
 
+import org.jf.dexlib2.writer.pool.DexPool;
 import soot.Body;
 import soot.BooleanType;
 import soot.ByteType;
@@ -149,15 +144,36 @@ import soot.toDex.instructions.InsnWithOffset;
  */
 public class DexPrinter {
 	
-	private static final String CLASSES_DEX = "classes.dex";
+	private static final String CLASSES_DEX = "classes.dex"; //TODO: remove me
+	private static final int MAX_DEX_METHODS = 64000;
+	private int dexOutputFileIndex = 1; //number to be appended to dex file eg classes1.dex
+	private String alternate_dex = null;
 	
 	private DexBuilder dexFile;
-	
+
+	private ArrayList<DexPool> dexPools = new ArrayList<>();
+	private ArrayList<Integer> dexPoolSize = new ArrayList<>();
 	private File originalApk;
 	
 	public DexPrinter() {
 		int api = Scene.v().getAndroidAPIVersion();
 		dexFile = new DexBuilder(Opcodes.forApi(api));
+		DexPool firstDexPool = new DexPool(Opcodes.forApi(api));
+		dexPools.add(firstDexPool);
+		dexPoolSize.add(0);
+	}
+	private void appendDexPool(){
+		int api = Scene.v().getAndroidAPIVersion();
+		dexPools.add(new DexPool(Opcodes.forApi(api)));
+		dexPoolSize.add(0);
+	}
+	private String getNextDexName(){
+		int index = dexOutputFileIndex;
+		++dexOutputFileIndex;
+		if(dexOutputFileIndex == 1)
+			return "classes.dex";
+		else
+			return "classes" + index + "dex";
 	}
 	
 	private void printApk(String outputDir, File originalApk) throws IOException {
@@ -465,7 +481,7 @@ public class DexPrinter {
         	throw new RuntimeException("Unexpected constant type");
     }
     
-    private void addAsClassDefItem(SootClass c) {
+    private BuilderClassDef addAsClassDefItem(SootClass c) {
         // add source file tag if any
         String sourceFile = null;
         if (c.hasTag("SourceFileTag")) {
@@ -517,15 +533,15 @@ public class DexPrinter {
 	        	fields.add(field);
 	        }
         }
-        	
-        dexFile.internClassDef(classType,
-        		accessFlags,
-        		superClass,
-        		interfaces,
-        		sourceFile,
-        		buildClassAnnotations(c),
-        		fields,
-        		toMethods(c));
+
+		return dexFile.internClassDef(classType,
+				accessFlags,
+				superClass,
+				interfaces,
+				sourceFile,
+				buildClassAnnotations(c),
+				fields,
+				toMethods(c));
 	}
     
     private Set<Annotation> buildClassAnnotations(SootClass c) {
@@ -1545,8 +1561,12 @@ public class DexPrinter {
 	public void add(SootClass c) {
 		if (c.isPhantom())
 			return;
-				
-		addAsClassDefItem(c);
+
+		BuilderClassDef builderClassDef = addAsClassDefItem(c);
+
+		//Check if adding this class would overflow dexpool
+		//TODO: finish me
+
 		// save original APK for this class, needed to copy all the other files inside
 		Map<String, File> dexClassIndex = SourceLocator.v().dexClassIndex();
     	if (dexClassIndex == null) {
@@ -1563,15 +1583,22 @@ public class DexPrinter {
 	}
 
 	public void print() {
+		//TODO: finish dex print for multidex
 		String outputDir = SourceLocator.v().getOutputDir();
 		try {
 			if (originalApk != null
 					&& Options.v().output_format() != Options.output_format_force_dex) {
 				printApk(outputDir, originalApk);
 			} else {
-				String fileName = outputDir + File.separatorChar + CLASSES_DEX;
-				G.v().out.println("Writing dex to: " + fileName);
-				writeTo(fileName);
+				if(alternate_dex == null) {
+					String fileName = outputDir + File.separatorChar + CLASSES_DEX;
+					G.v().out.println("Writing dex to: " + fileName);
+					writeTo(fileName);
+				}else{
+					String fileName = outputDir + File.separatorChar + alternate_dex;
+					G.v().out.println("Writing dex to: " + fileName);
+					writeTo(fileName);
+				}
 			}
 		} catch (IOException e) {
 			throw new CompilationDeathException("I/O exception while printing dex", e);
