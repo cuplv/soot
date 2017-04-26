@@ -169,14 +169,6 @@ public class DexPrinter {
 		dexPools.add(newDexPool);
 		return newDexPool;
 	}
-	private String getNextDexName(){
-		int index = dexOutputFileIndex;
-		++dexOutputFileIndex;
-		if(dexOutputFileIndex == 1)
-			return "classes.dex";
-		else
-			return "classes" + index + "dex";
-	}
 	
 	private void printApk(String outputDir, File originalApk) throws IOException {
 		//TODO: write dexpools
@@ -208,15 +200,12 @@ public class DexPrinter {
 		}
 		
 		// put our classes.dex into the zip archive
-		ArrayList<File> tmpFiles = new ArrayList<>();
-		for(int i = 0; i<dexPools.size(); ++i){
-			tmpFiles.add(File.createTempFile("toDex" + i, null));
-		}
 
 		try {
 
-			for(int i = 0; i< tmpFiles.size(); ++i) {
-				File tmpFile = tmpFiles.get(i);
+			for(int i = 0; i< dexPools.size(); ++i) {
+
+				File tmpFile = File.createTempFile("toDex" + i, null);
 				FileInputStream fis = new FileInputStream(tmpFile);
 				try {
 					String fName;
@@ -1612,8 +1601,6 @@ public class DexPrinter {
 			addAsClassDefItem(c, newDexPool);
 
 		}
-		//TODO: Test this code
-
 		// save original APK for this class, needed to copy all the other files inside
 		Map<String, File> dexClassIndex = SourceLocator.v().dexClassIndex();
     	if (dexClassIndex == null) {
