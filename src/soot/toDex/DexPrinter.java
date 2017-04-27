@@ -151,11 +151,15 @@ public class DexPrinter {
 	final int MAX_FIELD_ADDED_DURING_DEX_CREATION = 9; //Fields added to dex file on top of what we add
 	private int dexOutputFileIndex = 1; //number to be appended to dex file eg classes1.dex
 	private String alternate_dex = null;
-	
+
+
+	private int methods_added = 0;
+
 //	private DexBuilder dexFile;
 
 	private ArrayList<DexBuilder> dexPools = new ArrayList<>();
 	private File originalApk;
+	private int total_methods = 0;
 
 	public DexPrinter() {
 		int api = Scene.v().getAndroidAPIVersion();
@@ -1577,28 +1581,34 @@ public class DexPrinter {
 
 		//Add to dex pool which has enough space, if not add a new dexpool
 		boolean added = false;
-		int constantPoolSize = c.getMethodCount() //TODO: check if extra methods are created when dexified
-				+ c.getFieldCount();
-		for(DexBuilder dexPool : dexPools){
+		int methods_in_soot_class = c.getMethodCount(); //TODO: check if extra methods are created when dexified
+//				+ c.getFieldCount();
+
+		total_methods += methods_in_soot_class;
+		for(int i = 0; i < dexPools.size(); ++i){
+			DexBuilder dexPool = dexPools.get(i);
 			int numMethodIds = dexPool.getMethodReferences().size();
 			int numFieldIds = dexPool.getFieldReferences().size();
-			int maxFieldIdsInDex = numFieldIds + constantPoolSize + MAX_FIELD_ADDED_DURING_DEX_CREATION;
-			int maxMethodIdsInDex = numMethodIds + constantPoolSize + MAX_METHOD_ADDED_DURING_DEX_CREATION;
+//			int maxFieldIdsInDex = numFieldIds + methods_in_soot_class + MAX_FIELD_ADDED_DURING_DEX_CREATION;
+			int maxMethodIdsInDex = numMethodIds + methods_in_soot_class + MAX_METHOD_ADDED_DURING_DEX_CREATION;
 
-			if(maxMethodIdsInDex <= MAX_DEX_ID && maxFieldIdsInDex <= MAX_DEX_ID){
+			if(maxMethodIdsInDex <= MAX_DEX_ID){
+//				System.out.println("DEBUG_WHICH: " + c.getName() + " : " + i + " ; " + constantPoolSize);
 				addAsClassDefItem(c, dexPool);
+				methods_added += methods_in_soot_class;
 				added = true;
 				break;
 			}
 		}
 		if(!added){
 			DexBuilder newDexPool = appendDexPool();
-			if(constantPoolSize
+			if(methods_in_soot_class
 					> (MAX_DEX_ID - MAX_METHOD_ADDED_DURING_DEX_CREATION - MAX_FIELD_ADDED_DURING_DEX_CREATION)){
 				throw new CompilationDeathException("single class file: " + c.getName()
 						+ " is too big to fit in a single dex file");
 			}
 			addAsClassDefItem(c, newDexPool);
+			methods_added += methods_in_soot_class;
 
 		}
 		// save original APK for this class, needed to copy all the other files inside
