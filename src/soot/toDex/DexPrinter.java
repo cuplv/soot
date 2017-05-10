@@ -138,6 +138,8 @@ public class DexPrinter {
 
 	public DexPrinter() {
 		int api = Scene.v().getAndroidAPIVersion();
+		if(api > 23) //TODO: this is a hack for issue: https://github.com/Sable/soot/issues/731
+			api = 23;
 		DexBuilder dexFile = new DexBuilder(Opcodes.forApi(api));
 //		DexPool firstDexPool = new DexPool(Opcodes.forApi(api));
 		dexPools.add(dexFile);
