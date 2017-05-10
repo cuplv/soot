@@ -5,16 +5,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -62,28 +54,7 @@ import org.jf.dexlib2.immutable.value.ImmutableTypeEncodedValue;
 import org.jf.dexlib2.writer.builder.*;
 import org.jf.dexlib2.writer.io.FileDataStore;
 
-import org.jf.dexlib2.writer.pool.ClassPool;
-import org.jf.dexlib2.writer.pool.DexPool;
-import soot.Body;
-import soot.BooleanType;
-import soot.ByteType;
-import soot.CharType;
-import soot.CompilationDeathException;
-import soot.G;
-import soot.IntType;
-import soot.Local;
-import soot.PackManager;
-import soot.RefType;
-import soot.Scene;
-import soot.ShortType;
-import soot.SootClass;
-import soot.SootField;
-import soot.SootMethod;
-import soot.SootMethodRef;
-import soot.SourceLocator;
-import soot.Trap;
-import soot.Type;
-import soot.Unit;
+import soot.*;
 import soot.dexpler.DexInnerClassParser;
 import soot.dexpler.DexType;
 import soot.dexpler.Util;
@@ -93,6 +64,8 @@ import soot.jimple.Jimple;
 import soot.jimple.MonitorStmt;
 import soot.jimple.NopStmt;
 import soot.jimple.Stmt;
+import soot.jimple.toolkits.callgraph.CallGraph;
+import soot.jimple.toolkits.callgraph.Edge;
 import soot.jimple.toolkits.scalar.EmptySwitchEliminator;
 import soot.options.Options;
 import soot.tagkit.AbstractHost;
@@ -130,11 +103,12 @@ import soot.toDex.instructions.Insn;
 import soot.toDex.instructions.Insn10t;
 import soot.toDex.instructions.Insn30t;
 import soot.toDex.instructions.InsnWithOffset;
+import soot.util.Chain;
 
 /**
  * Main entry point for the "dex" output format.<br>
  * <br>
- * Use {@link #add(SootClass)} to add classes that should be printed as dex output and {@link #print()} to finally print the classes.<br>
+ * Use {@link #add(SootClass, boolean)} to add classes that should be printed as dex output and {@link #print()} to finally print the classes.<br>
  * If the printer has found the original APK of an added class (via {@link SourceLocator#dexClassIndex()}),
  * the files in the APK are copied to a new one, replacing it's classes.dex and excluding the signature files.
  * Note that you have to sign and align the APK yourself, with jarsigner and zipalign, respectively.<br>
@@ -146,7 +120,7 @@ import soot.toDex.instructions.InsnWithOffset;
 public class DexPrinter {
 	
 //	private static final String CLASSES_DEX = "classes.dex"; //TODO: remove me
-	private static final int MAX_DEX_ID = 65536; //maximum number of methods or fields in a dex file
+	private static final int MAX_DEX_ID = 40000; //TODO: more methods appear in dex than in sootmethod, this is a temporary hack
 	final int MAX_METHOD_ADDED_DURING_DEX_CREATION = 2; //Methods added to dex file on top of what we add
 	final int MAX_FIELD_ADDED_DURING_DEX_CREATION = 9; //Fields added to dex file on top of what we add
 	private int dexOutputFileIndex = 1; //number to be appended to dex file eg classes1.dex
@@ -158,8 +132,9 @@ public class DexPrinter {
 //	private DexBuilder dexFile;
 
 	private ArrayList<DexBuilder> dexPools = new ArrayList<>();
+	private Map<DexBuilder, Integer> methodCounts = new HashMap<>(); //Counting size of dexpool is slow use this instead
 	private File originalApk;
-	private int total_methods = 0;
+	private AtomicInteger total_methods = new AtomicInteger(0);
 
 	public DexPrinter() {
 		int api = Scene.v().getAndroidAPIVersion();
@@ -167,7 +142,7 @@ public class DexPrinter {
 //		DexPool firstDexPool = new DexPool(Opcodes.forApi(api));
 		dexPools.add(dexFile);
 	}
-	private DexBuilder appendDexPool(){
+	synchronized private DexBuilder appendDexPool(){
 		int api = Scene.v().getAndroidAPIVersion();
 		DexBuilder newDexPool = new DexBuilder(Opcodes.forApi(api));
 		dexPools.add(newDexPool);
@@ -1573,8 +1548,56 @@ public class DexPrinter {
 			}
 		}
 	}
-	
-	public void add(SootClass c) {
+	//TODO: decision process for first dex should be factored out into its own class
+	boolean inFirstPopulated = false;
+	Set<SootMethod> processedMethods = new HashSet<>();
+	Set<SootClass> inFirst = new HashSet<>();
+
+	public void addAllClassesPointedTo(SootMethod method, CallGraph cg){
+		if(processedMethods.contains(method))
+			return;
+		Iterator<Edge> edgeIterator = cg.edgesOutOf(method);
+		Set<SootClass> lInFirst = new HashSet<>();
+		while( edgeIterator.hasNext()){
+			Edge next = edgeIterator.next();
+			SootMethod targetMethod = next.getTgt().method();
+			if(targetMethod != null){
+				inFirst.add(targetMethod.getDeclaringClass());
+			}
+			processedMethods.add(targetMethod);
+			addAllClassesPointedTo(targetMethod, cg);
+
+		}
+	}
+
+	public boolean shouldBeInFirstDex(SootClass c){
+		if(!inFirstPopulated){
+			SootClass applicationClass = Scene.v().getSootClass("android.app.Application");
+			Chain<SootClass> classes = Scene.v().getClasses();
+			List<SootMethod> applicationClassMethods = new ArrayList();
+			FastHierarchy sootHierarchy = Scene.v().getOrMakeFastHierarchy();
+			for(SootClass clazz : classes){
+				if(sootHierarchy.isSubclass(clazz, applicationClass)){
+					for(SootMethod method : clazz.getMethods()){
+						applicationClassMethods.add(method);
+					}
+				}
+			}
+			CallGraph callGraph = Scene.v().getCallGraph();
+			for(SootMethod method : applicationClassMethods){
+				if(method.getName().contains("onCreate") || method.getName().contains("<init>") ||
+						method.getName().contains("<clinit>")){
+					addAllClassesPointedTo(method, callGraph);
+				}
+			}
+			inFirstPopulated = true;
+		}
+		return inFirst.contains(c);
+	}
+	public void add(SootClass c, boolean inFirstDex) {
+
+		if(c.getName().endsWith("DPMapProvider"))
+			System.out.println("====" + c.getName());
 		if (c.isPhantom())
 			return;
 
@@ -1584,24 +1607,41 @@ public class DexPrinter {
 		int methods_in_soot_class = c.getMethodCount(); //TODO: check if extra methods are created when dexified
 //				+ c.getFieldCount();
 
-		total_methods += methods_in_soot_class;
+		total_methods.addAndGet(methods_in_soot_class);
 		for(int i = 0; i < dexPools.size(); ++i){
 			DexBuilder dexPool = dexPools.get(i);
-			int numMethodIds = dexPool.getMethodReferences().size();
-			int numFieldIds = dexPool.getFieldReferences().size();
+			boolean addToThisOne = false;
+			synchronized(methodCounts) {
+				int numMethodIds = -1; //dexPool.getMethodReferences().size();
+				if (!methodCounts.containsKey(dexPool)) {
+					numMethodIds = dexPool.getMethodReferences().size();
+					methodCounts.put(dexPool, numMethodIds);
+				} else {
+					numMethodIds = methodCounts.get(dexPool);
+				}
 //			int maxFieldIdsInDex = numFieldIds + methods_in_soot_class + MAX_FIELD_ADDED_DURING_DEX_CREATION;
-			int maxMethodIdsInDex = numMethodIds + methods_in_soot_class + MAX_METHOD_ADDED_DURING_DEX_CREATION;
+				int maxMethodIdsInDex = numMethodIds + methods_in_soot_class + MAX_METHOD_ADDED_DURING_DEX_CREATION;
 
-			if(maxMethodIdsInDex <= MAX_DEX_ID){
+				if (maxMethodIdsInDex <= MAX_DEX_ID) {
+					addToThisOne = true;
+					int newMethodCount = methodCounts.get(dexPool) + methods_in_soot_class;
+					methodCounts.put(dexPool, newMethodCount);
+					methods_added += methods_in_soot_class;
+
+				}
+			}
+			if(addToThisOne){
 //				System.out.println("DEBUG_WHICH: " + c.getName() + " : " + i + " ; " + constantPoolSize);
 				addAsClassDefItem(c, dexPool);
-				methods_added += methods_in_soot_class;
 				added = true;
+				if(i != 0 && inFirstDex){
+					throw new CompilationDeathException("Too many classes need to be in first dex");
+				}
 				break;
 			}
 		}
 		if(!added){
-			DexBuilder newDexPool = appendDexPool();
+			DexBuilder newDexPool = appendDexPool(); //TODO: might append two dex files, not a huge problem but probably should be fixed
 			if(methods_in_soot_class
 					> (MAX_DEX_ID - MAX_METHOD_ADDED_DURING_DEX_CREATION - MAX_FIELD_ADDED_DURING_DEX_CREATION)){
 				throw new CompilationDeathException("single class file: " + c.getName()
@@ -1609,6 +1649,7 @@ public class DexPrinter {
 			}
 			addAsClassDefItem(c, newDexPool);
 			methods_added += methods_in_soot_class;
+			assert(!inFirstDex);
 
 		}
 		// save original APK for this class, needed to copy all the other files inside

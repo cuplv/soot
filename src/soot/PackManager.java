@@ -396,6 +396,7 @@ public class PackManager {
 
     public void runPacks() {
     	if(Options.v().oaat())
+    	    //TODO: add_to_first thing for this path
     		runPacksForOneClassAtATime();
     	else {
     		runPacksNormally();
@@ -445,7 +446,7 @@ public class PackManager {
                 
 				runBodyPacks(clazz);
 				//generate output
-				writeClass(clazz);
+				writeClass(clazz, true); //TODO: multi dex support for non threaded
 
 				if (!Options.v().no_writeout_body_releasing())
 					releaseBodies(clazz);
@@ -622,7 +623,8 @@ public class PackManager {
     }
 
     private void runBodyPacks( final Iterator<SootClass> classes ) {
-    	int threadNum = Runtime.getRuntime().availableProcessors();
+//    	int threadNum = Runtime.getRuntime().availableProcessors();
+        int threadNum = 1;
         CountingThreadPoolExecutor executor =  new CountingThreadPoolExecutor(threadNum,
         		threadNum, 30, TimeUnit.SECONDS,
         		new LinkedBlockingQueue<Runnable>());
@@ -668,18 +670,55 @@ public class PackManager {
         CountingThreadPoolExecutor executor =  new CountingThreadPoolExecutor(threadNum,
         		threadNum, 30, TimeUnit.SECONDS,
         		new LinkedBlockingQueue<Runnable>());
-    	
-        while( classes.hasNext() ) {
-        	final SootClass c = classes.next();
-           	executor.execute(new Runnable() {
-				
-				@Override
-				public void run() {
-					writeClass( c );
-				}
-				
-           	});
+
+        List<SootClass> classesInFirstDex = new ArrayList<>();
+        List<SootClass> otherClasses = new ArrayList<>();
+
+        while( classes.hasNext()){
+            SootClass c = classes.next();
+            if(dexPrinter.shouldBeInFirstDex(c)){
+                classesInFirstDex.add(c);
+            }else{
+                otherClasses.add(c);
+            }
         }
+
+        for(final SootClass c : classesInFirstDex){
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    writeClass(c, true);
+                }
+            });
+        }
+        //wait for all first class classes to be written
+        try {
+            executor.awaitCompletion();
+        } catch (InterruptedException e) {
+            // Something went horribly wrong
+            throw new RuntimeException("Could not wait for writer threads to "
+                    + "finish: " + e.getMessage(), e);
+        }
+        for(final SootClass c : otherClasses){
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    writeClass(c, false);
+                }
+            });
+        }
+    	
+//        while( classes.hasNext() ) {
+//        	final SootClass c = classes.next();
+//           	executor.execute(new Runnable() {
+//
+//				@Override
+//				public void run() {
+//					writeClass( c );
+//				}
+//
+//           	});
+//        }
         
         // Wait till all classes have been written
         try {
@@ -1061,7 +1100,7 @@ public class PackManager {
 		return bafBody;
 	}
 
-    private void writeClass(SootClass c) {
+    private void writeClass(SootClass c, boolean inFirstDex) {
         // Create code assignments for those values we only have in code assignments
         if (Options.v().output_format() == Options.output_format_jimple)
         	if (!c.isPhantom)
@@ -1073,7 +1112,7 @@ public class PackManager {
         if (format == Options.output_format_dex
         		|| format == Options.output_format_force_dex) {
         	// just add the class to the dex printer, writing is done after adding all classes
-        	dexPrinter.add(c);
+        	dexPrinter.add(c, inFirstDex);
         	return;
         }
 
